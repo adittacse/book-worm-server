@@ -11,6 +11,26 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+const verifyFireBaseToken = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+        return res.status(401).send({ message: "Unauthorized Access" });
+    }
+
+    const token = authHeader.split(" ")[1];
+    if (!token) {
+        return res.status(401).send({ message: "Unauthorized Access" });
+    }
+
+    try {
+        const decoded = await admin.auth().verifyIdToken(token);
+        req.token_email = decoded.email;
+        next();
+    } catch {
+        return res.status(401).send({ message: "Unauthorized Access" });
+    }
+};
+
 const uri = `mongodb+srv://${process.env.DB_USERNAME}:${process.env.DB_PASSWORD}@cluster0.gkaujxr.mongodb.net/?appName=Cluster0`;
 
 const client = new MongoClient(uri, {
@@ -37,6 +57,18 @@ async function run() {
             }
             next();
         };
+
+        // get user role
+        app.get("/users/:email/role", verifyFireBaseToken, async (req, res) => {
+            const email = req.params.email;
+
+            if (email !== req.token_email) {
+                return res.status(403).send({ role: "user" });
+            }
+
+            const user = await usersCollection.findOne({ email });
+            res.send({ role: user?.role || "user" });
+        });
 
         // user registration
         app.post("/users", async (req, res) => {
