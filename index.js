@@ -69,6 +69,7 @@ async function run() {
         const usersCollection = db.collection("users");
         const genresCollection = db.collection("genres");
         const booksCollection = db.collection("books");
+        const libraryCollection = db.collection("libraries");
 
         // more middleware
         const verifyAdmin = async (req, res, next) => {
@@ -458,13 +459,198 @@ async function run() {
         app.delete("/books/:id", verifyToken, verifyAdmin, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) };
-            
+
             try {
                 const result = await booksCollection.deleteOne(query);
                 res.send(result);
             } catch {
                 res.status(400).send({ message: "Invalid book id" });
             }
+        });
+
+        /* =========================================================
+            PHASE 3 — LIBRARY (Shelves + Progress)
+        ========================================================= */
+
+        // GET my library (all shelves)
+        app.get("/library/me", verifyToken, async (req, res) => {
+            const email = req.user.email;
+
+            const items = await libraryCollection
+                .find({ userEmail: email })
+                .sort({ updatedAt: -1 })
+                .toArray();
+
+            // book details join (simple way)
+            const bookIds = items
+                .map((i) => i.bookId)
+                .filter(Boolean)
+                .map((id) => new ObjectId(id));
+
+            const books = await booksCollection
+                .find({ _id: { $in: bookIds } })
+                .toArray();
+
+            // map: bookId -> book
+            const bookMap = {};
+            for (const b of books) {
+                bookMap[b._id.toString()] = b;
+            }
+
+            // attach book info
+            const result = items.map((i) => ({ ...i, book: bookMap[i.bookId] || null }));
+            res.send(result);
+        });
+
+        // add / move book to shelf
+        // body: { bookId, shelf }   shelf: want|reading|read
+        app.post("/library", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const { bookId, shelf } = req.body;
+            const query = { _id: new ObjectId(bookId) };
+
+            if (!bookId || !shelf) {
+                return res.status(400).send({ message: "bookId and shelf are required" });
+            }
+
+            if (!["want", "reading", "read"].includes(shelf)) {
+                return res.status(400).send({ message: "Invalid shelf" });
+            }
+
+            // validate book exists
+            let book;
+            try {
+                book = await booksCollection.findOne(query);
+            } catch {
+                return res.status(400).send({ message: "Invalid bookId" });
+            }
+
+            if (!book) {
+                return res.status(404).send({ message: "Book not found" });
+            }
+
+            const userBookQuery = {
+                userEmail: email,
+                bookId: bookId
+            };
+
+            const existing = await libraryCollection.findOne(userBookQuery);
+
+            // if new entry
+            if (!existing) {
+                const doc = {
+                    userEmail: email,
+                    bookId: bookId,
+                    shelf,
+                    progressType: "pages",
+                    pagesRead: 0,
+                    percent: 0,
+                    createdAt: new Date(),
+                    updatedAt: new Date(),
+                };
+
+                const result = await libraryCollection.insertOne(doc);
+
+                // update book totalShelved
+                await booksCollection.updateOne(query,{ $inc: { totalShelved: 1 } });
+
+                return res.send({ ok: true, inserted: true, result });
+            }
+
+            // move shelf
+            const update = {
+                $set: {
+                    shelf, updatedAt: new Date()
+                }
+            };
+
+            // if moved to want/read => reset progress
+            if (shelf !== "reading") {
+                update.$set.pagesRead = 0;
+                update.$set.percent = 0;
+                update.$set.progressType = "pages";
+            }
+
+            const result = await libraryCollection.updateOne(query, update);
+            res.send({ ok: true, inserted: false, result });
+        });
+
+        // UPDATE progress (only when shelf = reading)
+        // body: { bookId, progressType, pagesRead, percent }
+        app.patch("/library/progress", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const { bookId, progressType = "pages", pagesRead, percent } = req.body;
+
+            if (!bookId) {
+                return res.status(400).send({ message: "bookId is required" });
+            }
+
+            if (!["pages", "percent"].includes(progressType)) {
+                return res.status(400).send({ message: "Invalid progressType" });
+            }
+
+            const item = await libraryCollection.findOne({ userEmail: email, bookId });
+            if (!item) {
+                return res.status(404).send({ message: "Book not found in your library" });
+            }
+
+            if (item.shelf !== "reading") {
+                return res.status(400).send({ message: "Progress can be updated only in 'Currently Reading' shelf" });
+            }
+
+            const updateDoc = {
+                $set: {
+                    updatedAt: new Date(), progressType
+                }
+            };
+
+            // validate numbers safely (beginner-friendly)
+            if (progressType === "pages") {
+                const p = parseInt(pagesRead);
+                if (isNaN(p) || p < 0) {
+                    return res.status(400).send({ message: "Invalid pagesRead" });
+                }
+                updateDoc.$set.pagesRead = p;
+                updateDoc.$set.percent = 0;
+            } else {
+                const pr = parseFloat(percent);
+                if (isNaN(pr) || pr < 0 || pr > 100) {
+                    return res.status(400).send({ message: "Invalid percent (0-100)" });
+                }
+                updateDoc.$set.percent = pr;
+                updateDoc.$set.pagesRead = 0;
+            }
+
+            const result = await libraryCollection.updateOne(
+                { userEmail: email, bookId },
+                updateDoc
+            );
+
+            res.send({ ok: true, result });
+        });
+
+        // REMOVE book from my library
+        app.delete("/library/:bookId", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const bookId = req.params.bookId;
+            const query = { _id: new ObjectId(bookId) };
+
+            const exists = await libraryCollection.findOne({ userEmail: email, bookId });
+            if (!exists) {
+                return res.status(404).send({ message: "Not found" });
+            }
+
+            const result = await libraryCollection.deleteOne({ userEmail: email, bookId });
+
+            // decrease totalShelved
+            try {
+                await booksCollection.updateOne(
+                    query,
+                    { $inc: { totalShelved: -1 } }
+                );
+            } catch {}
+
+            res.send({ ok: true, result });
         });
 
         // Send a ping to confirm a successful connection
