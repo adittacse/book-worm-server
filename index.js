@@ -49,6 +49,7 @@ async function run() {
         
         const usersCollection = db.collection("users");
         const genresCollection = db.collection("genres");
+        const booksCollection = db.collection("books");
 
         // more middleware
         const verifyAdmin = async (req, res, next) => {
@@ -181,7 +182,7 @@ async function run() {
             res.send(result);
         });
 
-        // delete genre (block if books exist)
+        // delete a genre (block if books exist)
         app.delete("/genres/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
             const id = req.params.id;
             const query = { _id: new ObjectId(id) };
@@ -196,6 +197,81 @@ async function run() {
 
             const result = await genresCollection.deleteOne(query);
             res.send(result);
+        });
+
+        // books related api's
+
+        // browse books with search, filter, pagination and sort
+        app.get("/books", verifyFireBaseToken, async (req, res) => {
+            const {
+                page = 1,
+                limit = 10,
+                search = "",
+                genre = "",
+                minRating,
+                maxRating,
+                sort = "newest",
+            } = req.query;
+
+            const pg = Math.max(parseInt(page), 1);
+            const lm = Math.min(Math.max(parseInt(limit), 1), 50);
+
+            const query = {};
+
+            // search by title or author
+            if (search) {
+                query.$or = [
+                    { title: { $regex: search, $options: "i" } },
+                    { author: { $regex: search, $options: "i" } },
+                ];
+            }
+
+            // multi genre filter: genre=id1,id2
+            if (genre) {
+                const ids = genre.split(",").map((x) => x.trim()).filter(Boolean);
+                
+                if (ids.length > 0) {
+                    query.genreId = { $in: ids };
+                }
+            }
+
+            // rating range
+            if (minRating || maxRating) {
+                query.avgRating = {};
+                if (minRating) {
+                    query.avgRating.$gte = parseFloat(minRating);
+                }
+                if (maxRating) {
+                    query.avgRating.$lte = parseFloat(maxRating);
+                }
+            }
+
+            let sortQuery = {};
+
+            if (sort === "rating") {
+                sortQuery = { avgRating: -1 };
+            } else if (sort === "shelved") {
+                sortQuery = { totalShelved: -1 };
+            } else {
+                sortQuery = { createdAt: -1 }; // newest
+            }
+
+            const total = await booksCollection.countDocuments(query);
+
+            const books = await booksCollection
+                .find(query)
+                .sort(sortQuery)
+                .skip((pg - 1) * lm)
+                .limit(lm)
+                .toArray();
+
+            res.send({
+                total,
+                page: pg,
+                limit: lm,
+                totalPages: Math.ceil(total / lm),
+                result: books,
+            });
         });
 
         // Send a ping to confirm a successful connection
