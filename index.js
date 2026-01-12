@@ -89,6 +89,18 @@ async function run() {
             res.send(result);
         });
 
+        // is admin check
+        app.get("/users/admin/:email", verifyFireBaseToken, async (req, res) => {
+            const email = req.params.email;
+
+            if (email !== req.token_email) {
+                return res.send({ admin: false });
+            }
+
+            const user = await usersCollection.findOne({ email });
+            res.send({ admin: user?.role === "admin" });
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
