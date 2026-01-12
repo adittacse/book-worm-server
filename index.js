@@ -25,7 +25,37 @@ async function run() {
     try {
         // Connect the client to the server	(optional starting in v4.7)
         await client.connect();
+        const db = client.db("bookwormDB");
+        const usersCollection = db.collection("users");
 
+        // more middleware
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.token_email;
+            const user = await usersCollection.findOne({ email });
+            if (!user || user.role !== "admin") {
+                return res.status(403).send({ message: "Forbidden Access!" });
+            }
+            next();
+        };
+
+        // user registration
+        app.post("/users", async (req, res) => {
+            const user = req.body;
+
+            const exists = await usersCollection.findOne({ email: user.email });
+            if (exists) {
+                return res.send({ message: "User already exists" });
+            }
+
+            const newUser = {
+                ...user,
+                role: "user",
+                createdAt: new Date(),
+            };
+
+            const result = await usersCollection.insertOne(newUser);
+            res.send(result);
+        });
 
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
