@@ -136,6 +136,31 @@ async function run() {
             res.send(result);
         });
 
+        // create a genre
+        app.post("/genres", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const { name } = req.body;
+
+            if (!name || !name.trim()) {
+                return res.status(400).send({ message: "Genre name is required" });
+            }
+
+            const exists = await genresCollection.findOne({
+                name: { $regex: name, $options: "i" },
+            });
+
+            if (exists) {
+                return res.status(409).send({ message: "Genre already exists" });
+            }
+
+            const newGenre = {
+                name: name.trim(),
+                createdAt: new Date()
+            };
+
+            const result = await genresCollection.insertOne(newGenre);
+            res.send(result);
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
