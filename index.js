@@ -70,6 +70,7 @@ async function run() {
         const genresCollection = db.collection("genres");
         const booksCollection = db.collection("books");
         const libraryCollection = db.collection("libraries");
+        const reviewsCollection = db.collection("reviews");
 
         // more middleware
         const verifyAdmin = async (req, res, next) => {
@@ -79,6 +80,34 @@ async function run() {
                 return res.status(403).send({ message: "Forbidden Access!" });
             }
             next();
+        };
+
+        const recomputeBookAvgRating = async (bookId) => {
+            const cursor = reviewsCollection.find({ bookId, status: "approved" }).project({ rating: 1 });
+            const query = { _id: new ObjectId(bookId) };
+            const approved = await cursor.toArray();
+
+            const options = {
+                $set: { avgRating: 0 }
+            }
+
+            if (approved.length === 0) {
+                await booksCollection.updateOne(query, options);
+                return 0;
+            }
+
+            const sum = approved.reduce((acc, r) => acc + (parseFloat(r.rating) || 0), 0);
+            const avg = sum / approved.length;
+
+            // keep 1 decimal
+            const rounded = Math.round(avg * 10) / 10;
+
+            const updateOptions = {
+                $set: { avgRating: rounded }
+            };
+
+            await booksCollection.updateOne(query, updateOptions);
+            return rounded;
         };
 
         /* =========================================================
@@ -469,7 +498,7 @@ async function run() {
         });
 
         /* =========================================================
-            PHASE 3 — LIBRARY (Shelves + Progress)
+            LIBRARY (Shelves + Progress)
         ========================================================= */
 
         // GET my library (all shelves)
@@ -651,6 +680,152 @@ async function run() {
             } catch {}
 
             res.send({ ok: true, result });
+        });
+
+        /* =========================================================
+            Reviews + Pending/Approved + Admin Moderation
+        ========================================================= */
+
+        // USER: submit review (pending)
+        app.post("/reviews", verifyToken, async (req, res) => {
+            const email = req.user.email;
+            const { bookId, rating, text } = req.body;
+            const query = { _id: new ObjectId(bookId) };
+
+            if (!bookId || rating === undefined || !text) {
+                return res.status(400).send({ message: "bookId, rating, text are required" });
+            }
+
+            const r = parseFloat(rating);
+            if (isNaN(r) || r < 1 || r > 5) {
+                return res.status(400).send({ message: "Rating must be between 1 and 5" });
+            }
+
+            if (text.trim().length < 10) {
+                return res.status(400).send({ message: "Review must be at least 10 characters" });
+            }
+
+            // validate book exists
+            let book;
+
+            try {
+                book = await booksCollection.findOne(query);
+            } catch {
+                return res.status(400).send({ message: "Invalid bookId" });
+            }
+
+            if (!book) {
+                return res.status(404).send({ message: "Book not found" });
+            }
+
+            // get user info for showing on approved reviews
+            const user = await usersCollection.findOne({ email });
+            const userName = user?.name || "Anonymous";
+            const userPhoto = user?.photo || "";
+
+            // optional rule: one review per user per book
+            const exists = await reviewsCollection.findOne({ bookId, userEmail: email });
+            if (exists) {
+                return res.status(409).send({ message: "You already submitted a review for this book" });
+            }
+
+            const newReview = {
+                bookId,
+                userEmail: email,
+                userName,
+                userPhoto,
+                rating: r,
+                text: text.trim(),
+                status: "pending",
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+
+            const result = await reviewsCollection.insertOne(newReview);
+            res.send({ ok: true, message: "Review submitted for approval", result });
+        });
+
+        // USER: get approved reviews for a book
+        // GET /reviews/approved?bookId=xxxx
+        app.get("/reviews/approved", verifyToken, async (req, res) => {
+            const { bookId } = req.query;
+
+            if (!bookId) {
+                return res.status(400).send({ message: "bookId is required" });
+            }
+
+            const cursor = reviewsCollection.find({ bookId, status: "approved" }).sort({ createdAt: -1 });
+            const result = await cursor.toArray();
+            res.send(result);
+        });
+
+        // ADMIN: list pending reviews
+        app.get("/reviews/pending", verifyToken, verifyAdmin, async (req, res) => {
+            const cursor = reviewsCollection.find({ status: "pending" }).sort({ createdAt: -1 });
+            const result = await cursor.toArray();
+            res.send(result);
+        });
+
+        // ADMIN: approve a review + recompute book avgRating
+        app.patch("/reviews/:id/approve", verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+
+            let review;
+            try {
+                review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+            } catch {
+                return res.status(400).send({ message: "Invalid review id" });
+            }
+
+            if (!review) {
+                return res.status(404).send({ message: "Review not found" });
+            }
+
+            if (review.status === "approved") {
+                return res.send({ ok: true, message: "Already approved" });
+            }
+
+            const result = await reviewsCollection.updateOne(
+                { _id: new ObjectId(id) },
+                { $set: { status: "approved", updatedAt: new Date() } }
+            );
+
+            const newAvg = await recomputeBookAvgRating(review.bookId);
+
+            res.send({
+                ok: true,
+                message: "Review approved",
+                avgRating: newAvg,
+                result,
+            });
+        });
+
+        // ADMIN: delete review (pending/approved both)
+        // If approved review deleted => avgRating recompute
+        app.delete("/reviews/:id", verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+
+            let review;
+            try {
+                review = await reviewsCollection.findOne({ _id: new ObjectId(id) });
+            } catch {
+                return res.status(400).send({ message: "Invalid review id" });
+            }
+
+            if (!review) {
+                return res.status(404).send({ message: "Review not found" });
+            }
+
+            const wasApproved = review.status === "approved";
+            const bookId = review.bookId;
+
+            const result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+
+            if (wasApproved) {
+                await recomputeBookAvgRating(bookId);
+            }
+
+            res.send({ ok: true, message: "Review deleted", result });
         });
 
         // Send a ping to confirm a successful connection
