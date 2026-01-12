@@ -46,7 +46,9 @@ async function run() {
         // Connect the client to the server	(optional starting in v4.7)
         await client.connect();
         const db = client.db("bookwormDB");
+        
         const usersCollection = db.collection("users");
+        const genresCollection = db.collection("genres");
 
         // more middleware
         const verifyAdmin = async (req, res, next) => {
@@ -57,6 +59,8 @@ async function run() {
             }
             next();
         };
+
+        // users auth and role related api's
 
         // get user role
         app.get("/users/:email/role", verifyFireBaseToken, async (req, res) => {
@@ -80,7 +84,9 @@ async function run() {
             }
 
             const newUser = {
-                ...user,
+                name: user.name,
+                email: user.email,
+                photo: user.photo || "",
                 role: "user",
                 createdAt: new Date(),
             };
@@ -118,6 +124,15 @@ async function run() {
             };
 
             const result = await usersCollection.updateOne(query, update);
+            res.send(result);
+        });
+
+        // admin CRUD related api's
+
+        // get list of genres
+        app.get("/genres", verifyFireBaseToken, async (req, res) => {
+            const cursor = genresCollection.find().sort({ name: 1 });
+            const result = await cursor.toArray();
             res.send(result);
         });
 
