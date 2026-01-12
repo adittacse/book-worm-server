@@ -71,6 +71,7 @@ async function run() {
         const booksCollection = db.collection("books");
         const libraryCollection = db.collection("libraries");
         const reviewsCollection = db.collection("reviews");
+        const tutorialsCollection = db.collection("tutorials");
 
         // more middleware
         const verifyAdmin = async (req, res, next) => {
@@ -108,6 +109,41 @@ async function run() {
 
             await booksCollection.updateOne(query, updateOptions);
             return rounded;
+        };
+
+        const isYouTubeUrl = (url) => {
+            if (!url) {
+                return false;
+            }
+
+            try {
+                const u = new URL(url);
+                const host = u.hostname.replace("www.", "");
+                return host === "youtube.com" || host === "youtu.be";
+            } catch {
+                return false;
+            }
+        };
+        
+        const getYouTubeVideoId = (url) => {
+            try {
+                const u = new URL(url);
+                const host = u.hostname.replace("www.", "");
+                if (host === "youtu.be") {
+                    return u.pathname.replace("/", "");
+                }
+                // youtube.com/watch?v=ID
+                if (u.searchParams.get("v")) {
+                    return u.searchParams.get("v");
+                }
+                // youtube.com/embed/ID
+                if (u.pathname.includes("/embed/")) {
+                    return u.pathname.split("/embed/")[1];
+                }
+                return "";
+            } catch {
+                return "";
+            }
         };
 
         /* =========================================================
@@ -909,6 +945,130 @@ async function run() {
                 avgRatingGiven: myAvgRating,
                 favoriteGenres: topGenres.map((g) => ({ id: g._id.toString(), name: g.name, count: genreCount[g._id.toString()] || 0 })),
             });
+        });
+
+        /* =========================================================
+            TUTORIALS (YouTube links)
+        ========================================================= */
+
+        // GET tutorials (logged in)
+        app.get("/tutorials", verifyToken, async (req, res) => {
+            const cursor = tutorialsCollection.find().sort({ createdAt: -1 });
+            const tutorials = await cursor.toArray();
+
+            // add videoId for easy embed in frontend
+            const result = tutorials.map((t) => ({
+                ...t,
+                videoId: getYouTubeVideoId(t.youtubeUrl),
+            }));
+
+            res.send(result);
+        });
+
+        // ADMIN: add tutorial
+        app.post("/tutorials", verifyToken, verifyAdmin, async (req, res) => {
+            const { title, youtubeUrl } = req.body;
+
+            if (!title || !title.trim() || !youtubeUrl || !youtubeUrl.trim()) {
+                return res.status(400).send({ message: "title and youtubeUrl are required" });
+            }
+
+            if (!isYouTubeUrl(youtubeUrl.trim())) {
+                return res.status(400).send({ message: "Invalid YouTube URL" });
+            }
+
+            const newTutorial = {
+                title: title.trim(),
+                youtubeUrl: youtubeUrl.trim(),
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            };
+
+            const result = await tutorialsCollection.insertOne(newTutorial);
+            res.send({ ok: true, result });
+        });
+
+        // ADMIN: update tutorial
+        app.patch("/tutorials/:id", verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const { title, youtubeUrl } = req.body;
+            const query = { _id: new ObjectId(id) };
+
+            const updateDoc = {
+                $set: {
+                    updatedAt: new Date()
+                }
+            };
+
+            if (title && title.trim()) {
+                updateDoc.$set.title = title.trim();
+            }
+
+            if (youtubeUrl && youtubeUrl.trim()) {
+                if (!isYouTubeUrl(youtubeUrl.trim())) {
+                    return res.status(400).send({ message: "Invalid YouTube URL" });
+                }
+                updateDoc.$set.youtubeUrl = youtubeUrl.trim();
+            }
+
+            if (Object.keys(updateDoc.$set).length === 1) {
+                return res.send({ message: "Nothing to update" });
+            }
+
+            try {
+                const result = await tutorialsCollection.updateOne(query, updateDoc);
+                res.send({ ok: true, result });
+            } catch {
+                res.status(400).send({ message: "Invalid tutorial id" });
+            }
+        });
+
+        // ADMIN: delete tutorial
+        app.delete("/tutorials/:id", verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+
+            try {
+                const result = await tutorialsCollection.deleteOne(query);
+                res.send({ ok: true, result });
+            } catch {
+                res.status(400).send({ message: "Invalid tutorial id" });
+            }
+        });
+
+        // ADMIN: seed 12 default tutorials (optional helper)
+        app.post("/tutorials/seed", verifyToken, verifyAdmin, async (req, res) => {
+            const count = await tutorialsCollection.countDocuments();
+            if (count >= 10) {
+                return res.send({ message: "Already seeded (10+ tutorials exist)" });
+            }
+
+            const seedData = [
+                { title: "How to Read More Books (Practical Tips)", youtubeUrl: "https://www.youtube.com/watch?v=E7Z1gY8cX3w" },
+                { title: "Best Books to Start Reading Habit", youtubeUrl: "https://www.youtube.com/watch?v=GQY9nYVxFfU" },
+                { title: "How to Choose Your Next Book", youtubeUrl: "https://www.youtube.com/watch?v=7d8wVf4mR5s" },
+                { title: "Book Reviews: How to Write Better Reviews", youtubeUrl: "https://www.youtube.com/watch?v=Kk7cR7pTqkI" },
+                { title: "Reading Tips: Speed vs Comprehension", youtubeUrl: "https://www.youtube.com/watch?v=0uGm5xw9m2A" },
+                { title: "Top Fiction Books Recommendation", youtubeUrl: "https://www.youtube.com/watch?v=7bXkG9bGk7w" },
+                { title: "Top Non-Fiction Books Recommendation", youtubeUrl: "https://www.youtube.com/watch?v=Hc5f1oQwD6E" },
+                { title: "How to Track Reading Progress", youtubeUrl: "https://www.youtube.com/watch?v=Q4Xh2x1VZ2Y" },
+                { title: "Build a Daily Reading Routine", youtubeUrl: "https://www.youtube.com/watch?v=1F3QwYp9pEw" },
+                { title: "Must Read Classics (Beginner Friendly)", youtubeUrl: "https://www.youtube.com/watch?v=9qWgJqkK8iM" },
+                { title: "Books That Improve Productivity", youtubeUrl: "https://www.youtube.com/watch?v=Vw6s1gWmTtI" },
+                { title: "How to Remember What You Read", youtubeUrl: "https://www.youtube.com/watch?v=2Zr8p2mVw6k" },
+            ];
+
+            // filter only valid youtube urls (safe)
+            const safeSeed = seedData.filter((x) => isYouTubeUrl(x.youtubeUrl));
+
+            const docs = safeSeed.map((x) => ({
+                ...x,
+                createdAt: new Date(),
+                updatedAt: new Date(),
+            }));
+
+            const result = await tutorialsCollection.insertMany(docs);
+            res.send({ ok: true, insertedCount: result.insertedCount });
         });
 
         // Send a ping to confirm a successful connection
