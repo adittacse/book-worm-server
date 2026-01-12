@@ -181,6 +181,23 @@ async function run() {
             res.send(result);
         });
 
+        // delete genre (block if books exist)
+        app.delete("/genres/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+
+            const hasBook = await booksCollection.findOne({ genreId: id });
+
+            if (hasBook) {
+                return res.status(409).send({
+                    message: "Cannot delete: this genre is used by one or more books",
+                });
+            }
+
+            const result = await genresCollection.deleteOne(query);
+            res.send(result);
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
