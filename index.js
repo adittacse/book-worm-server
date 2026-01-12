@@ -161,6 +161,26 @@ async function run() {
             res.send(result);
         });
 
+        // update a genre
+        app.patch("/genres/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const { name } = req.body;
+            const query = { _id: new ObjectId(id) };
+
+            if (!name || !name.trim()) {
+                return res.status(400).send({ message: "Genre name is required" });
+            }
+
+            const update = {
+                $set: {
+                    name: name.trim()
+                }
+            }
+
+            const result = await genresCollection.updateOne(query, update);
+            res.send(result);
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
