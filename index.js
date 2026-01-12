@@ -625,9 +625,23 @@ async function run() {
             // move shelf
             const update = {
                 $set: {
-                    shelf, updatedAt: new Date()
+                    shelf,
+                    updatedAt: new Date()
                 }
             };
+
+            // if moved to read => set finishedAt
+            if (shelf === "read") {
+                update.$set.finishedAt = new Date();
+            }
+
+            // if moved to want => reset progress
+            if (shelf === "want") {
+                update.$set.pagesRead = 0;
+                update.$set.percent = 0;
+                update.$set.progressType = "pages";
+                update.$set.finishedAt = null;
+                }
 
             // if moved to want/read => reset progress
             if (shelf !== "reading") {
@@ -636,7 +650,7 @@ async function run() {
                 update.$set.progressType = "pages";
             }
 
-            const result = await libraryCollection.updateOne(query, update);
+            const result = await libraryCollection.updateOne(userBookQuery, update);
             res.send({ ok: true, inserted: false, result });
         });
 
@@ -1069,6 +1083,186 @@ async function run() {
 
             const result = await tutorialsCollection.insertMany(docs);
             res.send({ ok: true, insertedCount: result.insertedCount });
+        });
+
+        /* =========================================================
+            ADMIN DASHBOARD (Stats + Charts)
+        ========================================================= */
+
+        app.get("/admin/stats", verifyToken, verifyAdmin, async (req, res) => {
+            const totalUsers = await usersCollection.countDocuments();
+            const totalBooks = await booksCollection.countDocuments();
+            const pendingReviews = await reviewsCollection.countDocuments({ status: "pending" });
+            const totalGenres = await genresCollection.countDocuments();
+            const totalTutorials = await tutorialsCollection.countDocuments();
+
+            res.send({
+                totalUsers,
+                totalBooks,
+                totalGenres,
+                totalTutorials,
+                pendingReviews,
+            });
+        });
+
+        // Chart 1: Books per Genre
+        app.get("/admin/charts/books-per-genre", verifyToken, verifyAdmin, async (req, res) => {
+            const genres = await genresCollection.find().sort({ name: 1 }).toArray();
+            const genreMap = {};
+            genres.forEach((g) => (genreMap[g._id.toString()] = g.name));
+
+            const agg = await booksCollection
+                .aggregate([
+                    {
+                        $group: {
+                            _id: "$genreId",
+                            count: { $sum: 1 },
+                        },
+                    },
+                    {
+                        $sort: { count: -1 }
+                    },
+                ])
+                .toArray();
+
+            const labels = agg.map((x) => genreMap[x._id] || "Unknown");
+            const data = agg.map((x) => x.count);
+
+            // Recharts friendly too
+            const chart = agg.map((x) => ({
+                name: genreMap[x._id] || "Unknown",
+                value: x.count,
+            }));
+
+            res.send({ labels, data, chart });
+        });
+
+        // Chart 2: Monthly Books Read (Current Year)
+        app.get("/admin/charts/monthly-books-read", verifyToken, verifyAdmin, async (req, res) => {
+            const year = parseInt(req.query.year) || new Date().getFullYear();
+
+            const start = new Date(`${year}-01-01T00:00:00.000Z`);
+            const end = new Date(`${year + 1}-01-01T00:00:00.000Z`);
+
+            const agg = await libraryCollection
+                .aggregate([
+                    {
+                        $match: { shelf: "read" }
+                    },
+                    {
+                        $addFields: {
+                        doneDate: {
+                            $ifNull: ["$finishedAt", "$updatedAt"] },
+                        },
+                    },
+                    {
+                        $match: {
+                            doneDate: { $gte: start, $lt: end }
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: { $month: "$doneDate" },
+                            count: { $sum: 1 },
+                        },
+                    },
+                    {
+                        $sort: { "_id": 1 }
+                    },
+                ])
+                .toArray();
+
+            // ensure 12 months
+            const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+            const map = {};
+            agg.forEach((x) => (map[x._id] = x.count));
+
+            const labels = months;
+            const data = months.map((_, idx) => map[idx + 1] || 0);
+
+            // recharts
+            const chart = months.map((m, idx) => ({
+                month: m,
+                books: map[idx + 1] || 0,
+            }));
+
+            res.send({ year, labels, data, chart });
+        });
+
+        // Chart 3: Monthly Pages Read (Current Year)
+        app.get("/admin/charts/pages-read-monthly", verifyToken, verifyAdmin, async (req, res) => {
+            const year = parseInt(req.query.year) || new Date().getFullYear();
+
+            const start = new Date(`${year}-01-01T00:00:00.000Z`);
+            const end = new Date(`${year + 1}-01-01T00:00:00.000Z`);
+
+            const agg = await libraryCollection
+                .aggregate([
+                    { $match: { shelf: "read" } },
+                    {
+                        $addFields: {
+                        doneDate: { $ifNull: ["$finishedAt", "$updatedAt"] },
+                        },
+                    },
+                    {
+                        $match: {
+                            doneDate: { $gte: start, $lt: end }
+                        }
+                    },
+
+                    // join book to get totalPages
+                    {
+                        $lookup: {
+                            from: "books",
+                            let: { bid: "$bookId" },
+                            pipeline: [
+                                {
+                                    $match: {
+                                        $expr: {
+                                            $eq: ["$_id", { $toObjectId: "$$bid" }]
+                                        },
+                                    },
+                                },
+                                {
+                                    $project: { totalPages: 1 }
+                                },
+                            ],
+                            as: "book",
+                        },
+                    },
+                    {
+                        $unwind: {
+                            path: "$book", preserveNullAndEmptyArrays: true
+                        }
+                    },
+
+                    {
+                        $group: {
+                            _id: { $month: "$doneDate" },
+                            pages: {
+                                $sum: { $ifNull: ["$book.totalPages", 0] }
+                            },
+                        },
+                    },
+                    {
+                        $sort: { "_id": 1 }
+                    },
+                ])
+            .toArray();
+
+            const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+            const map = {};
+            agg.forEach((x) => (map[x._id] = x.pages));
+
+            const labels = months;
+            const data = months.map((_, idx) => map[idx + 1] || 0);
+
+            const chart = months.map((m, idx) => ({
+                month: m,
+                pages: map[idx + 1] || 0,
+            }));
+
+            res.send({ year, labels, data, chart });
         });
 
         // Send a ping to confirm a successful connection
