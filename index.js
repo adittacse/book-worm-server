@@ -292,6 +292,38 @@ async function run() {
             }
         });
 
+        // create a book
+        app.post("/books", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const { title, author, genreId, description, coverImage, totalPages } = req.body;
+            const query = { _id: new ObjectId(genreId) };
+            
+            if (!title || !author || !genreId || !description || !coverImage) {
+                return res.status(400).send({ message: "Missing required fields" });
+            }
+
+            const genreExists = await genresCollection.findOne(query);
+
+            if (!genreExists) {
+                return res.status(400).send({ message: "Invalid genreId" });
+            }
+
+            const doc = {
+                title: title.trim(),
+                author: author.trim(),
+                genreId: genreId,
+                description: description.trim(),
+                coverImage: coverImage.trim(),
+                totalPages: totalPages ? parseInt(totalPages) : 0,
+                // derived fields (later phases will update)
+                avgRating: 0,
+                totalShelved: 0,
+                createdAt: new Date(),
+            };
+
+            const result = await booksCollection.insertOne(doc);
+            res.send(result);
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
