@@ -101,6 +101,26 @@ async function run() {
             res.send({ admin: user?.role === "admin" });
         });
 
+        // get all users
+        app.get("/users", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const cursor = usersCollection.find();
+            const result = await cursor.toArray();
+            res.send(result);
+        });
+
+        // change user role
+        app.patch("/users/:id/role", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const { role } = req.body;
+            const query = { _id: new ObjectId(id) }
+            const update = {
+                $set: { role }
+            };
+
+            const result = await usersCollection.updateOne(query, update);
+            res.send(result);
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
