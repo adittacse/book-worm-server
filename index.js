@@ -324,6 +324,53 @@ async function run() {
             res.send(result);
         });
 
+        // update a book
+        app.patch("/books/:id", verifyFireBaseToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+
+            const updated = req.body || {};
+            const updateDoc = { $set: {} };
+
+            // only update if provided
+            if (updated.title) {
+                updateDoc.$set.title = updated.title.trim();
+            }
+            if (updated.author) {
+                updateDoc.$set.author = updated.author.trim();
+            }
+            if (updated.description) {
+                updateDoc.$set.description = updated.description.trim();
+            }
+            if (updated.coverImage) {
+                updateDoc.$set.coverImage = updated.coverImage.trim();
+            }
+            if (updated.totalPages !== undefined) {
+                updateDoc.$set.totalPages = parseInt(updated.totalPages) || 0;
+            }
+
+            // if genreId given, validate exists
+            if (updated.genreId) {
+                const genreExists = await genresCollection.findOne({ _id: new ObjectId(updated.genreId) });
+                if (!genreExists) {
+                    return res.status(400).send({ message: "Invalid genreId" });
+                }
+                updateDoc.$set.genreId = updated.genreId;
+            }
+
+            if (Object.keys(updateDoc.$set).length === 0) {
+                return res.send({ message: "Nothing to update" });
+            }
+
+            try {
+                const result = await booksCollection.updateOne(query, updateDoc);
+                res.send(result);
+            } catch {
+                return res.status(400).send({ message: "Invalid book id" });
+            }
+        }
+        );
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
