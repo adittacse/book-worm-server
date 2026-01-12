@@ -828,6 +828,89 @@ async function run() {
             res.send({ ok: true, message: "Review deleted", result });
         });
 
+        /* =========================================================
+            USER DASHBOARD STATS
+        ========================================================= */
+
+        // GET my dashboard stats
+        app.get("/dashboard/me/stats", verifyToken, async (req, res) => {
+            const email = req.user.email;
+
+            // library items
+            const libraryItems = await libraryCollection.find({ userEmail: email }).toArray();
+
+            const readItems = libraryItems.filter((i) => i.shelf === "read");
+            const readingItems = libraryItems.filter((i) => i.shelf === "reading");
+
+            // get books for page calculations
+            const ids = libraryItems.map((i) => i.bookId).filter(Boolean).map((id) => new ObjectId(id));
+            const books = await booksCollection.find({ _id: { $in: ids } }).toArray();
+
+            const bookMap = {};
+            for (const b of books) {
+                bookMap[b._id.toString()] = b;
+            }
+
+            // pages read
+            let totalPagesRead = 0;
+
+            // read shelf => full pages
+            for (const it of readItems) {
+                const b = bookMap[it.bookId];
+                totalPagesRead += b?.totalPages ? parseInt(b.totalPages) : 0;
+            }
+
+            // reading shelf => progress pages or percent
+            for (const it of readingItems) {
+                const b = bookMap[it.bookId];
+                const totalPages = b?.totalPages ? parseInt(b.totalPages) : 0;
+
+                if (it.progressType === "pages") {
+                    totalPagesRead += parseInt(it.pagesRead || 0);
+                } else if (it.progressType === "percent") {
+                    totalPagesRead += Math.round((totalPages * (parseFloat(it.percent || 0) / 100)));
+                }
+            }
+
+            // avg rating given (approved + pending both count as "given")
+            const myReviews = await reviewsCollection.find({ userEmail: email }).project({ rating: 1 }).toArray();
+            const myAvgRating =
+                myReviews.length === 0
+                ? 0
+                : Math.round(
+                    (myReviews.reduce((acc, r) => acc + (parseFloat(r.rating) || 0), 0) / myReviews.length) * 10
+                    ) / 10;
+
+            // favorite genre (from read shelf)
+            const genreCount = {};
+            for (const it of readItems) {
+                const b = bookMap[it.bookId];
+                if (b?.genreId) {
+                    genreCount[b.genreId] = (genreCount[b.genreId] || 0) + 1;
+                }
+            }
+
+            // top 3 genre ids
+            const topGenreIds = Object.entries(genreCount)
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 3)
+                .map(([gid]) => gid);
+
+            const topGenres = topGenreIds.length
+                ? await genresCollection
+                    .find({ _id: { $in: topGenreIds.map((id) => new ObjectId(id)) } })
+                    .toArray()
+                : [];
+
+            res.send({
+                readCount: readItems.length,
+                readingCount: readingItems.length,
+                totalPagesRead,
+                avgRatingGiven: myAvgRating,
+                favoriteGenres: topGenres.map((g) => ({ id: g._id.toString(), name: g.name, count: genreCount[g._id.toString()] || 0 })),
+            });
+        });
+
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
         console.log(
