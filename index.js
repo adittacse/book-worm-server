@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const { MongoClient, ServerApiVersion } = require("mongodb");
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const dotenv = require("dotenv");
@@ -16,7 +16,7 @@ app.use(express.json());
 // helpers
 const isStrongPassword = (pw) => {
     // upper, lower, number
-    if (!pw || pw.length < 8) {
+    if (!pw || pw.length < 6) {
         return false;
     }
     const hasUpper = /[A-Z]/.test(pw);
@@ -155,22 +155,21 @@ async function run() {
             try {
                 const { name, email, photo, password } = req.body;
 
-                // required fields check
                 if (!name || !email || !photo || !password) {
                     return res.status(400).send({
                         message: "Missing fields: name, email, photo, password",
                     });
                 }
 
-                // password strength check
+                const normalizedEmail = email.trim().toLowerCase();
+
                 if (!isStrongPassword(password)) {
                     return res.status(400).send({
-                        message: "Weak password. Use 8+ chars with uppercase, lowercase & number.",
+                        message: "Weak password. Use 6+ chars with uppercase, lowercase & number.",
                     });
                 }
-
-                // duplicate email check
-                const exists = await usersCollection.findOne({ email });
+                
+                const exists = await usersCollection.findOne({ email: normalizedEmail });
                 if (exists) {
                     return res.status(409).send({ message: "Email already exists" });
                 }
@@ -179,7 +178,7 @@ async function run() {
 
                 const newUser = {
                     name: name.trim(),
-                    email: email.trim().toLowerCase(),
+                    email: normalizedEmail,
                     photo: photo.trim(),
                     role: "user",
                     provider: "manual",
@@ -189,7 +188,6 @@ async function run() {
 
                 const result = await usersCollection.insertOne(newUser);
 
-                // optional: auto-login token
                 const token = signToken({
                     userId: result.insertedId.toString(),
                     email: newUser.email,
@@ -208,7 +206,7 @@ async function run() {
                     },
                 });
             } catch (err) {
-                res.status(500).send({ message: "Server error in registration" });
+                res.status(500).send({ message: err?.message || "Server error in registration" });
             }
         });
 
@@ -254,6 +252,53 @@ async function run() {
             } catch (err) {
                 res.status(500).send({ message: "Server error in login" });
             }
+        });
+
+        app.post("/auth/oauth-sync", async (req, res) => {
+            const apiKey = req.headers["x-api-key"];
+
+            if (!process.env.OAUTH_SYNC_KEY || apiKey !== process.env.OAUTH_SYNC_KEY) {
+                return res.status(401).send({ message: "Unauthorized" });
+            }
+
+            const { name, email, photo, provider, providerId } = req.body;
+
+            if (!email) {
+                return res.status(400).send({ message: "email required" });
+            }
+
+            const exists = await usersCollection.findOne({ email: email.toLowerCase() });
+
+            if (!exists) {
+                await usersCollection.insertOne({
+                name: name || "",
+                email: email.toLowerCase(),
+                photo: photo || "",
+                role: "user",
+                provider: provider || "oauth",
+                providerId: providerId || "",
+                createdAt: new Date(),
+                });
+            }
+
+            const user = await usersCollection.findOne({ email: email.toLowerCase() });
+
+            const token = jwt.sign(
+                { userId: user._id.toString(), email: user.email, role: user.role || "user" },
+                process.env.JWT_SECRET,
+                { expiresIn: "7d" }
+            );
+
+            res.send({
+                ok: true,
+                token,
+                user: {
+                    name: user.name,
+                    email: user.email,
+                    photo: user.photo,
+                    role: user.role || "user"
+                },
+            });
         });
 
         // Logged-in: get my role (self)
@@ -655,57 +700,87 @@ async function run() {
         });
 
         // UPDATE progress (only when shelf = reading)
-        // body: { bookId, progressType, pagesRead, percent }
-        app.patch("/library/progress", verifyToken, async (req, res) => {
+        // body: { progressType?, pagesRead?, percent? }
+        app.patch("/library/:id/progress", verifyToken, async (req, res) => {
             const email = req.user.email;
-            const { bookId, progressType = "pages", pagesRead, percent } = req.body;
+            const id = req.params.id;
 
-            if (!bookId) {
-                return res.status(400).send({ message: "bookId is required" });
+            let item;
+            try {
+                item = await libraryCollection.findOne({
+                    _id: new ObjectId(id),
+                    userEmail: email,
+                });
+            } catch {
+                return res.status(400).send({ message: "Invalid libraryId" });
             }
 
-            if (!["pages", "percent"].includes(progressType)) {
-                return res.status(400).send({ message: "Invalid progressType" });
-            }
-
-            const item = await libraryCollection.findOne({ userEmail: email, bookId });
             if (!item) {
-                return res.status(404).send({ message: "Book not found in your library" });
+                return res.status(404).send({ message: "Library item not found" });
             }
 
             if (item.shelf !== "reading") {
                 return res.status(400).send({ message: "Progress can be updated only in 'Currently Reading' shelf" });
             }
 
-            const updateDoc = {
-                $set: {
-                    updatedAt: new Date(), progressType
-                }
-            };
+            // get book total pages
+            const book = await booksCollection.findOne({ _id: new ObjectId(item.bookId) });
+            const totalPages = Number(book?.totalPages || 0);
 
-            // validate numbers safely (beginner-friendly)
+            const { progressType = "pages", pagesRead, percent } = req.body;
+
+            if (!["pages", "percent"].includes(progressType)) {
+                return res.status(400).send({ message: "Invalid progressType" });
+            }
+
+            const updateDoc = { $set: { updatedAt: new Date(), progressType } };
+
             if (progressType === "pages") {
                 const p = parseInt(pagesRead);
                 if (isNaN(p) || p < 0) {
                     return res.status(400).send({ message: "Invalid pagesRead" });
                 }
+
                 updateDoc.$set.pagesRead = p;
-                updateDoc.$set.percent = 0;
+
+                // auto calculate percent when totalPages exists
+                if (totalPages > 0) {
+                    const pr = Math.min(Math.max((p / totalPages) * 100, 0), 100);
+                    updateDoc.$set.percent = Math.round(pr); // rounded int (0-100)
+                } else {
+                    updateDoc.$set.percent = 0;
+                }
             } else {
                 const pr = parseFloat(percent);
                 if (isNaN(pr) || pr < 0 || pr > 100) {
                     return res.status(400).send({ message: "Invalid percent (0-100)" });
                 }
+
                 updateDoc.$set.percent = pr;
-                updateDoc.$set.pagesRead = 0;
+
+                // auto calculate pagesRead when totalPages exists
+                if (totalPages > 0) {
+                const p = Math.round((pr / 100) * totalPages);
+                    updateDoc.$set.pagesRead = p;
+                } else {
+                    updateDoc.$set.pagesRead = 0;
+                }
             }
 
             const result = await libraryCollection.updateOne(
-                { userEmail: email, bookId },
+                { _id: new ObjectId(id), userEmail: email },
                 updateDoc
             );
 
-            res.send({ ok: true, result });
+            res.send({
+                ok: true,
+                result,
+                progress: {
+                    pagesRead: updateDoc.$set.pagesRead,
+                    percent: updateDoc.$set.percent,
+                    totalPages,
+                },
+            });
         });
 
         // REMOVE book from my library
@@ -735,6 +810,26 @@ async function run() {
         /* =========================================================
             Reviews + Pending/Approved + Admin Moderation
         ========================================================= */
+
+        app.get("/reviews", verifyToken, async (req, res) => {
+            const { bookId } = req.query;
+            if (!bookId) {
+                return res.status(400).send({ message: "bookId is required" });
+            }
+
+            const result = await reviewsCollection
+                .find({ bookId, status: "approved" })
+                .sort({ createdAt: -1 })
+                .toArray();
+
+            res.send(result);
+        });
+
+        app.get("/admin/reviews/approved", verifyToken, verifyAdmin, async (req, res) => {
+            const cursor = reviewsCollection.find({ status: "approved" }).sort({ createdAt: -1 });
+            const result = await cursor.toArray();
+            res.send(result);
+        });
 
         // USER: submit review (pending)
         app.post("/reviews", verifyToken, async (req, res) => {
@@ -1272,7 +1367,7 @@ async function run() {
         );
     } finally {
         // Ensures that the client will close when you finish/error
-        await client.close();
+        // await client.close();
     }
 }
 run().catch(console.dir);
