@@ -1170,41 +1170,6 @@ async function run() {
             }
         });
 
-        // ADMIN: seed 12 default tutorials (optional helper)
-        app.post("/tutorials/seed", verifyToken, verifyAdmin, async (req, res) => {
-            const count = await tutorialsCollection.countDocuments();
-            if (count >= 10) {
-                return res.send({ message: "Already seeded (10+ tutorials exist)" });
-            }
-
-            const seedData = [
-                { title: "How to Read More Books (Practical Tips)", youtubeUrl: "https://www.youtube.com/watch?v=E7Z1gY8cX3w" },
-                { title: "Best Books to Start Reading Habit", youtubeUrl: "https://www.youtube.com/watch?v=GQY9nYVxFfU" },
-                { title: "How to Choose Your Next Book", youtubeUrl: "https://www.youtube.com/watch?v=7d8wVf4mR5s" },
-                { title: "Book Reviews: How to Write Better Reviews", youtubeUrl: "https://www.youtube.com/watch?v=Kk7cR7pTqkI" },
-                { title: "Reading Tips: Speed vs Comprehension", youtubeUrl: "https://www.youtube.com/watch?v=0uGm5xw9m2A" },
-                { title: "Top Fiction Books Recommendation", youtubeUrl: "https://www.youtube.com/watch?v=7bXkG9bGk7w" },
-                { title: "Top Non-Fiction Books Recommendation", youtubeUrl: "https://www.youtube.com/watch?v=Hc5f1oQwD6E" },
-                { title: "How to Track Reading Progress", youtubeUrl: "https://www.youtube.com/watch?v=Q4Xh2x1VZ2Y" },
-                { title: "Build a Daily Reading Routine", youtubeUrl: "https://www.youtube.com/watch?v=1F3QwYp9pEw" },
-                { title: "Must Read Classics (Beginner Friendly)", youtubeUrl: "https://www.youtube.com/watch?v=9qWgJqkK8iM" },
-                { title: "Books That Improve Productivity", youtubeUrl: "https://www.youtube.com/watch?v=Vw6s1gWmTtI" },
-                { title: "How to Remember What You Read", youtubeUrl: "https://www.youtube.com/watch?v=2Zr8p2mVw6k" },
-            ];
-
-            // filter only valid youtube urls (safe)
-            const safeSeed = seedData.filter((x) => isYouTubeUrl(x.youtubeUrl));
-
-            const docs = safeSeed.map((x) => ({
-                ...x,
-                createdAt: new Date(),
-                updatedAt: new Date(),
-            }));
-
-            const result = await tutorialsCollection.insertMany(docs);
-            res.send({ ok: true, insertedCount: result.insertedCount });
-        });
-
         /* =========================================================
             ADMIN DASHBOARD (Stats + Charts)
         ========================================================= */
