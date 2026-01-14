@@ -334,6 +334,31 @@ async function run() {
             },
         );
 
+        // ADMIN: delete user
+        app.delete("/users/:id", verifyToken, verifyAdmin, async (req, res) => {
+            const id = req.params.id;
+            const query = { _id: new ObjectId(id) };
+
+            let user;
+            try {
+                user = await usersCollection.findOne(query);
+            } catch {
+                return res.status(400).send({ message: "Invalid user id" });
+            }
+
+            if (!user) {
+                return res.status(404).send({ message: "User not found" });
+            }
+
+            // safety: prevent deleting self
+            if (user.email && req.user?.email && user.email === req.user.email) {
+                return res.status(400).send({ message: "You cannot delete your own account" });
+            }
+
+            const result = await usersCollection.deleteOne({ _id: new ObjectId(id) });
+            res.send({ ok: true, message: "User deleted", result });
+        });
+
         /* =========================================================
             GENRES (Protected) - same logic, just middleware changed
         ========================================================= */
